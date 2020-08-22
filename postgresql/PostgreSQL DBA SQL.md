@@ -6,6 +6,7 @@
   - [vacummm](#vacummm)
   - [性能问题分析](#性能问题分析)
     - [TOP SQL](#top-sql)
+    - [索引缺失](#索引缺失)
   - [对象管理](#对象管理)
     - [对象查看](#对象查看)
   - [参考](#参考)
@@ -17,7 +18,7 @@ Auth: Hezhiyong
 用途: DBA 日常管理运维     
 
 ## 会话管理 
-停掉或者kill掉卡住的会话     
+停掉或者kill掉卡住的会话   
 a)优先在数据库操作查询活跃的后台会话：
 ```sql
 --查看活动会话数
@@ -128,6 +129,96 @@ select userid::regrole, dbid, query from pg_stat_statements order by temp_blks_w
 select * from pg_stat_statements order by total_time desc limit 5;
 ```
 
+
+查询读取Buffer次数最多的SQL，这些SQL可能由于所查询的数据没有索引，而导致了过多的Buffer读，也同时大量消耗了CPU
+``` sql
+select * from pg_stat_statements order by shared_blks_hit+shared_blks_read desc limit 5;
+```
+
+第二种方法是，直接通过pg_stat_activity视图，利用下面的查询，查看当前长时间执行，一直不结束的SQL。这些SQL对应造成CPU满，也有直接嫌疑。
+``` sql
+select datname, usename, client_addr, application_name, state, backend_start, xact_start, xact_stay, 
+query_start, query_stay, replace(query, chr(10), ' ') as query from (select pgsa.datname as datname, 
+pgsa.usename as usename, pgsa.client_addr client_addr, pgsa.application_name as application_name, 
+pgsa.state as state, pgsa.backend_start as backend_start, pgsa.xact_start as xact_start, 
+extract(epoch from (now() - pgsa.xact_start)) as xact_stay, pgsa.query_start as query_start, 
+extract(epoch from (now() - pgsa.query_start)) as query_stay , pgsa.query as query 
+from pg_stat_activity as pgsa where pgsa.state != 'idle' and pgsa.state != 'idle in transaction' and
+ pgsa.state != 'idle in transaction (aborted)') idleconnections order by query_stay desc limit 5;
+
+```
+### 索引缺失
+
+[外键是否丢失索引](https://dba.stackexchange.com/questions/121976/discover-missing-foreign-keys-and-or-indexes)
+```sql
+WITH source_data AS
+(
+    SELECT table_name AS source_table_name, column_name AS source_column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+    AND table_name LIKE 't_%'
+    AND column_name LIKE '%\_id'
+), target_data AS
+(
+    SELECT distinct table_name as target_table_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+    AND table_name like 't_%'
+), data_to_find AS
+(
+    SELECT *, CASE WHEN target_table_name IS NULL THEN 'No Match' ELSE 'Match' END AS match_found
+    FROM source_data
+    LEFT JOIN target_data ON ('t_' || LEFT(source_column_name, -3)) = target_table_name
+), foreign_keys AS
+(
+    SELECT
+        tc.constraint_name, tc.table_name, kcu.column_name, 
+        ccu.table_name AS foreign_table_name,
+        ccu.column_name AS foreign_column_name 
+    FROM 
+        information_schema.table_constraints AS tc 
+        JOIN information_schema.key_column_usage AS kcu
+          ON tc.constraint_name = kcu.constraint_name
+        JOIN information_schema.constraint_column_usage AS ccu
+          ON ccu.constraint_name = tc.constraint_name
+    WHERE constraint_type = 'FOREIGN KEY'
+)
+SELECT CASE WHEN constraint_name IS NULL THEN 'No Foreign Key' ELSE 'Foreign Key Found' end AS foreign_key, * FROM data_to_find
+LEFT JOIN foreign_keys ON 
+(
+    data_to_find.source_table_name = foreign_keys.table_name 
+    AND
+    data_to_find.source_column_name = foreign_keys.column_name
+)
+ORDER BY foreign_key, match_found, source_table_name, source_column_name;
+
+
+```
+
+[查找是否有全表扫描的sql](http://www.postgresonline.com/journal/archives/65-How-to-determine-which-tables-are-missing-indexes.html)
+```sql
+SELECT x1.table_in_trouble, pg_relation_size(x1.table_in_trouble)/1024/1024  AS sz_n_MB, x1.seq_scan, x1.idx_scan,
+CASE 
+WHEN pg_relation_size(x1.table_in_trouble) > 500000000  THEN 'Exceeds 500 megs, too large to count in a view. For a count, count individually'::text
+ELSE count(x1.table_in_trouble)::text
+END AS tbl_rec_count, 
+x1.priority
+FROM ( SELECT (schemaname::text || '.'::text) || relname::text AS table_in_trouble, seq_scan, idx_scan,
+CASE
+WHEN (seq_scan - idx_scan) < 500 THEN 'Minor Problem'::text
+WHEN (seq_scan - idx_scan) >= 500 AND (seq_scan - idx_scan) < 2500 THEN 'Major Problem'::text
+WHEN (seq_scan - idx_scan) >= 2500 THEN 'Extreme Problem'::text
+ELSE NULL::text
+END AS priority
+FROM  pg_stat_all_tables
+WHERE  seq_scan > idx_scan 
+AND schemaname != 'pg_catalog'::name 
+AND seq_scan > 100) x1 
+GROUP BY x1.table_in_trouble, x1.seq_scan, x1.idx_scan,x1.priority 
+ORDER BY  x1.seq_scan desc ,  x1.priority DESC limit 100 ;
+```
+
+
 ## 对象管理
 ### 对象查看
 ```sql
@@ -218,75 +309,6 @@ WHERE
 select * from pg_stat_user_functions order by calls desc;
 ```
 
-
-[外键是否丢失索引](https://dba.stackexchange.com/questions/121976/discover-missing-foreign-keys-and-or-indexes)
-```sql
-WITH source_data AS
-(
-    SELECT table_name AS source_table_name, column_name AS source_column_name
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-    AND table_name LIKE 't_%'
-    AND column_name LIKE '%\_id'
-), target_data AS
-(
-    SELECT distinct table_name as target_table_name
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-    AND table_name like 't_%'
-), data_to_find AS
-(
-    SELECT *, CASE WHEN target_table_name IS NULL THEN 'No Match' ELSE 'Match' END AS match_found
-    FROM source_data
-    LEFT JOIN target_data ON ('t_' || LEFT(source_column_name, -3)) = target_table_name
-), foreign_keys AS
-(
-    SELECT
-        tc.constraint_name, tc.table_name, kcu.column_name, 
-        ccu.table_name AS foreign_table_name,
-        ccu.column_name AS foreign_column_name 
-    FROM 
-        information_schema.table_constraints AS tc 
-        JOIN information_schema.key_column_usage AS kcu
-          ON tc.constraint_name = kcu.constraint_name
-        JOIN information_schema.constraint_column_usage AS ccu
-          ON ccu.constraint_name = tc.constraint_name
-    WHERE constraint_type = 'FOREIGN KEY'
-)
-SELECT CASE WHEN constraint_name IS NULL THEN 'No Foreign Key' ELSE 'Foreign Key Found' end AS foreign_key, * FROM data_to_find
-LEFT JOIN foreign_keys ON 
-(
-    data_to_find.source_table_name = foreign_keys.table_name 
-    AND
-    data_to_find.source_column_name = foreign_keys.column_name
-)
-ORDER BY foreign_key, match_found, source_table_name, source_column_name;
-
-
-```
-
-[查找是否有全表扫描的sql](http://www.postgresonline.com/journal/archives/65-How-to-determine-which-tables-are-missing-indexes.html)
-```sql
-SELECT x1.table_in_trouble, pg_relation_size(x1.table_in_trouble)/1024/1024  AS sz_n_MB, x1.seq_scan, x1.idx_scan,
-CASE 
-WHEN pg_relation_size(x1.table_in_trouble) > 500000000  THEN 'Exceeds 500 megs, too large to count in a view. For a count, count individually'::text
-ELSE count(x1.table_in_trouble)::text
-END AS tbl_rec_count, 
-x1.priority
-FROM ( SELECT (schemaname::text || '.'::text) || relname::text AS table_in_trouble, seq_scan, idx_scan,
-CASE
-WHEN (seq_scan - idx_scan) < 500 THEN 'Minor Problem'::text
-WHEN (seq_scan - idx_scan) >= 500 AND (seq_scan - idx_scan) < 2500 THEN 'Major Problem'::text
-WHEN (seq_scan - idx_scan) >= 2500 THEN 'Extreme Problem'::text
-ELSE NULL::text
-END AS priority
-FROM  pg_stat_all_tables
-WHERE  seq_scan > idx_scan 
-AND schemaname != 'pg_catalog'::name 
-AND seq_scan > 100) x1 
-GROUP BY x1.table_in_trouble, x1.seq_scan, x1.idx_scan,x1.priority 
-ORDER BY  x1.seq_scan desc ,  x1.priority DESC limit 100 ;
-```
 
 
 ## 参考
