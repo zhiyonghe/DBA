@@ -89,7 +89,7 @@ ps –ef|grep postgresql ##第二个字段pid，找到需要kill的那个进程
 kill pid 
 kill -9  pid   ##优先使用kill，kill -9的权限很高，可能引起故障 
 ```
-## vacummm    
+## vacumm    
 
 查看vocuum 进程
 ```sql
