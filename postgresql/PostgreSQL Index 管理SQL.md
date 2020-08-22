@@ -1,3 +1,4 @@
+```sql
 --查询索引详细信息
 SELECT
   t.tablename,
@@ -88,3 +89,5 @@ select 'alter table ' ||t3.nspname||'.'||t2.relname || ' ENABLE TRIGGER ' || tgn
 	
 --查询trigger状态
 select t2.relname,tgname,tgenabled from pg_trigger t1,pg_class t2 where t1.tgrelid=t2.oid ;
+
+```
