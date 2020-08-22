@@ -1,10 +1,20 @@
-# PostgreSQL DBA  SQL    
-### Auth: Hezhiyong
-### 日期：2020-8-22
-### 分类：postgres ,DBA,SQL
-### 用途: DBA 日常管理运维
 
-<!-- @import "[TOC]" {cmd="toc" depthFrom=1 depthTo=6 orderedList=false} -->
+# PostgreSQL DBA  SQL 
+- [PostgreSQL DBA  SQL](#postgresql-dba-sql)
+  - [脚本信息](#脚本信息)
+  - [会话管理](#会话管理)
+  - [vacummm](#vacummm)
+  - [性能问题分析](#性能问题分析)
+    - [TOP SQL](#top-sql)
+  - [对象管理](#对象管理)
+    - [对象查看](#对象查看)
+  - [参考](#参考)
+
+## 脚本信息
+Auth: Hezhiyong    
+日期：2020-8-22    
+分类：postgres ,DBA,SQL    
+用途: DBA 日常管理运维     
 
 ## 会话管理 
 停掉或者kill掉卡住的会话     
@@ -85,7 +95,9 @@ kill -9  pid   ##优先使用kill，kill -9的权限很高，可能引起故�
   select pid,datname,usename,query,xact_start 
    from pg_stat_activity where query like '%vacuum%' and query not like 'select%;
 ```
-## TOP SQL
+## 性能问题分析
+
+### TOP SQL
 ```sql
 --运行时间最久top 10
 SELECT 	pd.datname,pss.query AS SQLQuery ,pss.rows AS TotalRowCount
@@ -96,6 +108,24 @@ INNER JOIN pg_database AS pd
 	ON pss.dbid=pd.oid
 ORDER BY 4 DESC 
 LIMIT 10;
+
+--最耗IO SQL
+--单次调用最耗IO SQL TOP 5
+select userid::regrole, dbid, query from pg_stat_statements order by (blk_read_time+blk_write_time)/calls desc limit 5;  
+--总最耗IO SQL TOP 5
+select userid::regrole, dbid, query from pg_stat_statements order by (blk_read_time+blk_write_time) desc limit 20;  
+--最耗时 SQL
+--单次调用最耗时 SQL TOP 5
+select userid::regrole, dbid, query from pg_stat_statements order by mean_time desc limit 5;  
+--总最耗时 SQL TOP 5
+select userid::regrole, dbid, query from pg_stat_statements order by total_time desc limit 5;  
+--响应时间抖动最严重 SQL
+select userid::regrole, dbid, query from pg_stat_statements order by stddev_time desc limit 5;  
+--最耗共享内存 SQL
+select userid::regrole, dbid, query from pg_stat_statements order by (shared_blks_hit+shared_blks_dirtied) desc limit 5;  
+--最耗临时空间 SQL
+select userid::regrole, dbid, query from pg_stat_statements order by temp_blks_written desc limit 5;  
+select * from pg_stat_statements order by total_time desc limit 5;
 ```
 
 ## 对象管理
@@ -104,7 +134,7 @@ LIMIT 10;
 --查看表大小
 select relname, pg_size_pretty(pg_relation_size(relid)) from pg_stat_user_tables order by pg_relation_size(relid) desc; 
 
---查看表的大小：
+--查看索引的大小：
 SELECT table_name,
    pg_size_pretty(table_size) AS table_size,
    pg_size_pretty(indexes_size) AS indexes_size,
@@ -122,7 +152,7 @@ FROM information_schema.tables
 ORDER BY total_size DESC
 ) AS pretty_sizes   limit 10;
 
---查看表与索引的大小
+--查看表与索引的大小SQL 
 
 SELECT schemaname,tablename,
    pg_size_pretty(pg_relation_size(schemaname || '.' || tablename)) AS size_p,
@@ -259,21 +289,5 @@ ORDER BY  x1.seq_scan desc ,  x1.priority DESC limit 100 ;
 ```
 
 
-### 参考
+## 参考
 [德哥的PostgreSQL私房菜 - 史上最屌PG资料合集](https://yq.aliyun.com/articles/59251?spm=5176.100239.bloglist.95.5S5P9S)
-<details>
-  <summary><mark><font color=darkred>表，索引，约束</font></mark></summary>
-  <p> 表</p>
-  select * from pg_tables where tablename='white_list'; 
-
-  <pre><code>  
-select p.datname,p.usename,p.application_name,p.client_addr,p.query_start,
-       p.current_query,p.waiting,p.procpid 
-from pg_stat_activity p ; 
-
-select pg_cancel_backend('procpid');  --取消session  
-select pg_terminate_backend('procpid');         --结束session 
-  </code></pre>
-
-  <pre><code>xingchen</code></pre>
-</details>
